@@ -190,6 +190,40 @@ plot_cauchy <- function(prior, bounds) {
          type = "l")
 }
 
+tidy_posterior <- function(inputs, simulated, index, label) {
+    sim_draws <-
+        simulated %>%
+        dplyr::select(starts_with("y_sim[") & ends_with(paste0(index, "]"))) %>%
+        data.frame %>%
+        t
+
+    colnames(sim_draws) <- paste0("draw_", seq(1, ncol(sim_draws)))
+
+    draw_table <- as_tibble(sim_draws)
+
+    full_times = c()
+    for (t in 2:length(inputs$time)) {
+        new <- seq(inputs$time[t - 1],
+                            inputs$time[t],
+                            length.out = inputs$T_subsample + 1)[-(inputs$T_subsample + 1)]
+        full_times <- c(full_times, new)
+    }
+    full_times <- c(full_times, inputs$time[length(inputs$time)])
+
+    draw_table$time <- full_times
+    return(draw_table %>%
+        tidyr::pivot_longer(cols = -c(time),
+                            names_to = "draw",
+                            values_to = label))
+}
+
+lengthen <- function(data) {
+    return(tidyr::pivot_longer(data,
+                               cols = -c(time),
+                               names_to = "type",
+                               values_to = "temp"))
+}
+
 reference_run <- tibble(time=convert_time_strings(c("15:10", "17:11", "18:13", "19:23")),
                         temp=c(75.3, 69.0, 67.0, 64.0),
                         ambient=seq(27.5, 24.0, length.out = 4))
@@ -205,13 +239,13 @@ full_run <- tibble(time=convert_time_strings(c("14:33", "14:54", "15:14", "16:10
                    thick=c(0.7, 42.8, 45.6, 52.2, 52.5, 54.3),
                    )
 
-added_to_water <- full_run %>%
+measurement_points <- full_run %>%
+    dplyr::select(c(water, time, add)) %>%
     dplyr::filter(add != 0) %>%
-    dplyr::mutate(time = time + 0.5, water = water + add, add = NULL)
+    dplyr::mutate(time = time + 0.5, water = water + add, add = NULL) %>% lengthen %>%
+    dplyr::bind_rows(full_run %>% dplyr::select(-c(add))  %>% lengthen)
 
-dplyr::bind_rows(full_run, added_to_water) %>%
-    dplyr::select(-c(add)) %>%
-    tidyr::pivot_longer(cols = -c(time), names_to = "type", values_to = "temp") %>%
+measurement_points %>%
     ggplot(aes(x = time)) +
     geom_line(aes(y = temp, color=type)) +
     labs(x = "Time [minutes]",
@@ -240,6 +274,9 @@ full_meat$time_ref <- reference_run$time
 full_meat$T_ref <- length(full_meat$time_ref)
 full_meat$ambient_ref <- reference_run$ambient
 full_meat$temp_ref <- reference_run$temp
+
+## Simulation
+full_meat$T_subsample <- 20
 
 ## time constants in minutes
 ## Cauchy priors
@@ -279,6 +316,7 @@ bayesplot::mcmc_pairs(ref_fit$draws(),
                       )
 
 model <- cmdstanr::cmdstan_model("sousvide_full.stan")
+
 fit <- model$sample(data = full_meat,
                     seed = 2222,
                     chains = 4,
@@ -295,41 +333,38 @@ bayesplot::mcmc_pairs(fit$draws(),
 
 
 simulated <- fit$draws("y_sim", format="df") %>% tibble
+mk_tidy <- function(index, label) { return(tidy_posterior(full_meat, simulated, index, label)) }
+posterior <- mk_tidy(1, "water") %>%
+    dplyr::inner_join(mk_tidy(2, "thin"), by = c("time", "draw")) %>%
+    dplyr::inner_join(mk_tidy(3, "thick"), by = c("time", "draw")) 
 
-tidy_posterior <- function(simulated, index, label) {
-    sim_draws <- simulated %>%
-        dplyr::select(starts_with("y_sim[") & ends_with(paste0(index, "]"))) %>%
-        data.frame %>%
-        t
-
-    colnames(sim_draws) <- paste0("draw_", seq(1, ncol(sim_draws)))
-
-    draw_table <- as_tibble(sim_draws)
-
-    draw_table$time <- full_meat$time
-    return(draw_table %>% 
-        tidyr::pivot_longer(cols = -c(time),
-                            names_to = "draw",
-                            values_to = label))
-}
-
-specs <- c(1 = "water", 2 = "thin", 3 = "thick")
-
-posterior <- tidy_posterior(simulated, 1, "water") %>%
-    dplyr::inner_join(tidy_posterior(simulated, 2, "thin"), by = c("time", "draw")) %>%
-    dplyr::inner_join(tidy_posterior(simulated, 3, "thick"), by = c("time", "draw")) 
-    
+posterior_line_alpha <- 4e-3
 posterior %>%
     ggplot(aes(x = time, group = draw)) +
-    geom_line(aes(y = water),
-              alpha = 0.01,
-              color = "red") +
-    geom_line(aes(y = thin),
-              alpha = 0.01,
-              color = "green") +
-    geom_line(aes(y = thick),
-              alpha = 0.01,
-              color = "blue") +
+    geom_line(aes(y = water,
+                  color = "water"),
+              alpha = posterior_line_alpha) +
+    geom_line(aes(y = thin,
+                  color = "thin"),
+              alpha = posterior_line_alpha) +
+    geom_line(aes(y = thick,
+                  color = "thick"),
+              alpha = posterior_line_alpha) +
+    geom_point(data = measurement_points,
+               inherit.aes = FALSE,
+               aes(x = time,
+                   y = temp,
+                   color = type,
+                   shape = type)) +
+    scale_color_manual(values = c("water" = "red",
+                                  "thin" = "green",
+                                  "thick" = "blue",
+                                  "ambient" = "purple")) +
+    guides(color = guide_legend(
+               override.aes = list(alpha = 1),
+               title = "Region"),
+           shape = guide_legend(
+               title = "Region")) +
     labs(x = "Time [minutes]",
          y = "Temperature [C]",
          title = paste("Sous vide"))

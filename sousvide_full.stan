@@ -74,6 +74,9 @@ data {
   array[T_ref] real ambient_ref;
   array[T_ref] real temp_ref;
 
+  // Simulation config
+  int T_subsample;
+
   // Integrator config
   real rel_tol;
   real abs_tol;
@@ -167,22 +170,38 @@ model {
 }
 
 generated quantities {
-  array[T] vector[N_states] y_sim;
+  // T_subsample controls how many intermediate output points are
+  // emitted between each measurement.  This is awkward because the
+  // ambient temp is measured only exactly when we measured the
+  // others, so our interpolation table changes when we cross
+  // measurements.
+  array[(T - 1) * T_subsample + 1] vector[N_states] y_sim;
   y_sim[1] = y0;
   for (t in 2:T) {
-    y_sim[t - 1] = y_sim[t - 1] + add[t - 1];
-    array[1] real t1;
-    t1[1] = time[t];
-    array[1] vector[N_states] yout = ode_rk45_tol(ode_meat, y_sim[t - 1], time[t - 1], t1,
-                            rel_tol, abs_tol, max_steps,
-                            k_cooler,
-                            t_bounds_ambient[t - 1],
-                            bounds_ambient[t - 1],
-                            N_meat,
-                            k_meat,
-                            mass_ratio_meat);
-    y_sim[t] = yout[1];
+    // Compute subsampled times
+    int T_last = 1 + T_subsample * (t - 2);
+    array[T_subsample] real ts;
+    real delta = (time[t] - time[t - 1]) / T_subsample;
+    for (tsub in 1:T_subsample) {
+      ts[tsub] = time[t - 1] + tsub * delta;
+    }
+
+    // Add water if needed
+    vector[N_states] y_last = y_sim[T_last];
+    y_last[1] += add[t - 1];
+
+    // Simulate
+    y_sim[T_last + 1:T_last + T_subsample] =
+      ode_rk45_tol(ode_meat, y_last, time[t - 1], ts,
+                   rel_tol, abs_tol, max_steps,
+                   k_cooler,
+                   t_bounds_ambient[t - 1],
+                   bounds_ambient[t - 1],
+                   N_meat,
+                   k_meat,
+                   mass_ratio_meat);
   }
+
   array[T_ref] real y_sim_ref;
   y_sim_ref[1] = y0_ref;
   for (t in 2:T_ref) {
