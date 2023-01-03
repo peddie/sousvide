@@ -149,9 +149,9 @@ model {
   ylast_ref[1] = y0_ref;
   for (t in 2:T_ref) {
     array[1] real t1;
-    t1[1] = time[t];
+    t1[1] = time_ref[t];
     array[1] vector[1] y = ode_rk45_tol(ode_ref,
-                                        ylast_ref, time[t - 1], t1,
+                                        ylast_ref, time_ref[t - 1], t1,
                                         rel_tol, abs_tol, max_steps,
                                         k_cooler,
                                         t_bounds_ambient_ref[t - 1],
@@ -210,10 +210,10 @@ generated quantities {
     vector[1] y_last;
     y_last[1] = y_sim_ref[t - 1];
     array[1] vector[1] yout = ode_rk45_tol(ode_ref, y_last, time_ref[t - 1], t1,
-                            rel_tol, abs_tol, max_steps,
-                            k_cooler,
-                            t_bounds_ambient_ref[t - 1],
-                            bounds_ambient_ref[t - 1]);
+                                           rel_tol, abs_tol, max_steps,
+                                           k_cooler,
+                                           t_bounds_ambient_ref[t - 1],
+                                           bounds_ambient_ref[t - 1]);
     y_sim_ref[t] = yout[1][1];
   }
 }

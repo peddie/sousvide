@@ -217,6 +217,24 @@ tidy_posterior <- function(inputs, simulated, index, label) {
                             values_to = label))
 }
 
+tidy_posterior_reference <- function(inputs, simulated, label) {
+    sim_draws <-
+        simulated %>%
+        dplyr::select(starts_with("y_sim_ref")) %>%
+        data.frame %>%
+        t
+
+    colnames(sim_draws) <- paste0("draw_", seq(1, ncol(sim_draws)))
+
+    draw_table <- as_tibble(sim_draws)
+
+    draw_table$time <- inputs$time_ref
+    return(draw_table %>%
+        tidyr::pivot_longer(cols = -c(time),
+                            names_to = "draw",
+                            values_to = label))
+}
+
 lengthen <- function(data) {
     return(tidyr::pivot_longer(data,
                                cols = -c(time),
@@ -276,18 +294,12 @@ full_meat$ambient_ref <- reference_run$ambient
 full_meat$temp_ref <- reference_run$temp
 
 ## Simulation
-full_meat$T_subsample <- 20
+full_meat$T_subsample <- 50
 
 ## time constants in minutes
 ## Cauchy priors
-##
-## A mystery remains here: without a relatively tight prior and a high
-## lower bound on the cooler time constant, somehow the posterior
-## clusters much shorter, around 250 minutes.  The reference model
-## alone gives the expected results (closer to 1000 minutes).  Why is
-## this happening?
-full_meat$prior_k_cooler <- c(1000, 50);
-full_meat$bounds_k_cooler <- c(700, 2000);
+full_meat$prior_k_cooler <- c(1000, 300);
+full_meat$bounds_k_cooler <- c(100, 2000);
 full_meat$prior_k_meat <- c(50, 20);
 full_meat$bounds_k_meat <- c(1, 100);
 ## Inverse gamma prior
@@ -295,6 +307,8 @@ full_meat$prior_sigma <- c(3, 1);
 full_meat$rel_tol <- 1e-5
 full_meat$abs_tol <- 1e-5
 full_meat$max_steps <- 5000
+
+## pdf("sousvide.pdf", width=30, height=20)
 
 plot_invgamma(full_meat$prior_sigma, c(1e-2, 10))
 
@@ -316,7 +330,6 @@ bayesplot::mcmc_pairs(ref_fit$draws(),
                       )
 
 model <- cmdstanr::cmdstan_model("sousvide_full.stan")
-
 fit <- model$sample(data = full_meat,
                     seed = 2222,
                     chains = 4,
@@ -330,13 +343,23 @@ bayesplot::mcmc_pairs(fit$draws(),
                       ## condition = pairs_condition(nuts = "divergent__")
                       )
 
-
-
 simulated <- fit$draws("y_sim", format="df") %>% tibble
 mk_tidy <- function(index, label) { return(tidy_posterior(full_meat, simulated, index, label)) }
 posterior <- mk_tidy(1, "water") %>%
     dplyr::inner_join(mk_tidy(2, "thin"), by = c("time", "draw")) %>%
-    dplyr::inner_join(mk_tidy(3, "thick"), by = c("time", "draw")) 
+    dplyr::inner_join(mk_tidy(3, "thick"), by = c("time", "draw"))
+
+means <- fit$draws(format = "df") %>%
+    as_tibble %>%
+    dplyr::select(starts_with("k_")) %>%
+    colMeans
+
+region_colors <-
+    c("water" = "red",
+      "thin" = "green",
+      "thick" = "blue",
+      "ambient" = "purple",
+      "reference" = "black")
 
 posterior_line_alpha <- 4e-3
 posterior %>%
@@ -356,10 +379,7 @@ posterior %>%
                    y = temp,
                    color = type,
                    shape = type)) +
-    scale_color_manual(values = c("water" = "red",
-                                  "thin" = "green",
-                                  "thick" = "blue",
-                                  "ambient" = "purple")) +
+    scale_color_manual(values = region_colors) +
     guides(color = guide_legend(
                override.aes = list(alpha = 1),
                title = "Region"),
@@ -367,4 +387,58 @@ posterior %>%
                title = "Region")) +
     labs(x = "Time [minutes]",
          y = "Temperature [C]",
-         title = paste("Sous vide"))
+         title = paste("Sous vide with", full_meat$N_meat, "meat cuts"),
+         subtitle = "lines are draws from posterior; points are measurements",
+         caption = sprintf(
+             "time constant means [minutes]\nk_cooler: %.0f\nk_thin: %.2f\nk_thick: %.2f",
+             means["k_cooler"], means["k_meat[1]"], means["k_meat[2]"])
+         )
+
+ref_means <- ref_fit$draws(format = "df") %>%
+    as_tibble %>%
+    dplyr::select(starts_with("k_")) %>%
+    colMeans
+ref <- tidy_posterior_reference(full_meat,
+                                ref_fit$draws("y_sim_ref", format="df") %>% tibble,
+                                "reference")
+ref %>%
+    ggplot(aes(x = time, group = draw)) +
+    geom_line(aes(y = reference,
+                  color = "reference"),
+              alpha = posterior_line_alpha) +
+    geom_point(data = reference_run,
+               inherit.aes = FALSE,
+               aes(x = time, y = temp)) +
+    guides(color = guide_legend(
+               override.aes = list(alpha = 1),
+               title = "Region")) +
+    scale_color_manual(values = region_colors) +
+    labs(x = "Time [minutes]",
+         y = "Temperature [C]",
+         title = "Reference sous vide experiment",
+         caption = paste("k_cooler:", ref_means["k_cooler"], "minutes")
+         )
+
+
+ref_joint <- tidy_posterior_reference(full_meat,
+                                      fit$draws("y_sim_ref", format="df") %>% tibble,
+                                      "reference")
+ref_joint %>%
+    ggplot(aes(x = time, group = draw)) +
+    geom_line(aes(y = reference,
+                  color = "reference"),
+              alpha = posterior_line_alpha) +
+    geom_point(data = reference_run,
+               inherit.aes = FALSE,
+               aes(x = time, y = temp)) +
+    guides(color = guide_legend(
+               override.aes = list(alpha = 1),
+               title = "Region")) +
+    scale_color_manual(values = region_colors) +
+    labs(x = "Time [minutes]",
+         y = "Temperature [C]",
+         title = "Reference sous vide experiment (joint params)",
+         caption = paste("k_cooler:", means["k_cooler"], "minutes")
+         )
+
+## dev.off()
