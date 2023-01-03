@@ -4,6 +4,7 @@ library(loo)
 library(lubridate)
 library(cmdstanr)
 library(bayesplot)
+library(invgamma)
 
 times <- c(7 * 60 + 35,
            8 * 60,
@@ -160,3 +161,114 @@ fit <- model$sample(data = meat_sim,
                     fixed_param = TRUE,
                     seed = 2222,
                     chains = 1)
+
+
+
+## Raw data from 2-meat run
+convert_time_strings <- function(time_strings) {
+    times_raw <- time_strings %>%
+        lubridate::fast_strptime("%H:%M") %>%
+        (\(x) lubridate::hour(x) * 60 + lubridate::minute(x))
+    return(times_raw - times_raw[1])
+}
+
+plot_invgamma <- function(prior, bounds) {
+    dists <- seq(bounds[1], bounds[2], length.out = 200)
+    plot(dists,
+         invgamma::dinvgamma(dists,
+                             prior[1],
+                             scale = prior[2]),
+         type = "l")
+}
+
+plot_cauchy <- function(prior, bounds) {
+    distk <- seq(bounds[1], bounds[2], length.out = 200)
+    plot(distk,
+         dcauchy(distk,
+                 prior[1],
+                 prior[2]),
+         type = "l")
+}
+
+full_run <- tibble(time=convert_time_strings(c("14:33", "14:54", "15:14", "16:10", "16:48", "17:27")),
+                   ambient=c(28, 27.8, 27.7, 27.5, 27.2, 27.0),
+                   add=c(0, 0, 4.1, 0, 4.8, 0),
+                   water=c(58.4, 55.4, 51.0, 53.7, 52.7, 55.3),
+                   thin=c(6.5, 54.0, 53.0, 53.2, 52.5, 55.0),
+                   thick=c(0.7, 42.8, 45.6, 52.2, 52.5, 54.3),
+                   )
+
+added_to_water <- full_run %>%
+    dplyr::filter(add != 0) %>%
+    dplyr::mutate(time = time + 0.5, water = water + add, add = NULL)
+
+dplyr::bind_rows(full_run, added_to_water) %>%
+    dplyr::select(-c(add)) %>%
+    tidyr::pivot_longer(cols = -c(time), names_to = "type", values_to = "temp") %>%
+    ggplot(aes(x = time)) +
+    geom_line(aes(y = temp, color=type)) +
+    labs(x = "Time [minutes]",
+         y = "Temperature [C]",
+         title = "Sous vide with two meats")
+
+## Constants
+full_meat <- NULL
+full_meat$capacity_kg <- 10
+full_meat$meat_kg <- c(0.350, 0.500)  ## Fairly approximate
+full_meat$water_kg <- full_meat$capacity_kg - sum(full_meat$meat_kg)
+full_meat$thickness_cm <- c(0.4, 3)
+
+## Reformulate tablular data for Stan
+full_meat$time <- full_run$time
+full_meat$T <- length(full_meat$time)
+full_meat$ambient <- full_run$ambient
+full_meat$add <- full_run$add
+full_meat$temps <- full_run %>%
+    dplyr::select(-c(ambient, time, add)) %>%
+    as.matrix
+full_meat$N_meat <- ncol(full_meat$temps) - 1
+
+## time constants in minutes
+## Cauchy priors
+full_meat$prior_k_cooler <- c(1100, 200);
+full_meat$bounds_k_cooler <- c(300, 2000);
+full_meat$prior_k_meat <- c(50, 20);
+full_meat$bounds_k_meat <- c(1, 100);
+## Inverse gamma prior
+full_meat$prior_sigma <- c(3, 0.3);
+full_meat$rel_tol <- 1e-5
+full_meat$abs_tol <- 1e-5
+full_meat$max_steps <- 5000
+
+plot_invgamma(full_meat$prior_sigma, c(1e-2, 10))
+
+plot_cauchy(full_meat$prior_k_meat, full_meat$bounds_k_meat)
+
+plot_cauchy(full_meat$prior_k_cooler, full_meat$bounds_k_cooler)
+
+model <- cmdstanr::cmdstan_model("sousvide_full.stan")
+
+fit <- model$sample(data = full_meat,
+                    seed = 2222,
+                    ## adapt_delta = 0.9,
+                    ## max_treedepth = 16,
+                    chains = 4,
+                    parallel_chains = 4)
+
+fit$summary()
+bayesplot::mcmc_pairs(fit$draws(),
+                      pars = vars(-contains("y_sim"),
+                                  -contains("lp__")),
+                      np = nuts_params(fit)## ,
+                      ## condition = pairs_condition(nuts = "divergent__")
+                      )
+
+
+
+# Specifying thicknesses doesn't seem to be the way to go.  Perhaps
+# just estimate the thickness ratio between the first meat and
+                                        # subsequent cuts.
+
+cpp_options <- list("CXXFLAGS += -O3 -march=native")
+cmdstan_make_local(cpp_options = cpp_options, append = TRUE)
+rebuild_cmdstan(cores = 8)

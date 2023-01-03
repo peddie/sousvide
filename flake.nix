@@ -48,7 +48,10 @@
             RcppEigen
             Rcpp
             Rcpp11
+
+            # Stats
             dqrng
+            invgamma
 
             # Spatial stuff
             sp
