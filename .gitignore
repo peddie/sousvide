@@ -1,1 +1,5 @@
 .direnv
+sousvide
+sousvide_sim
+sousvide_full
+sousvide_ref

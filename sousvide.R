@@ -190,11 +190,18 @@ plot_cauchy <- function(prior, bounds) {
          type = "l")
 }
 
+reference_run <- tibble(time=convert_time_strings(c("15:10", "17:11", "18:13", "19:23")),
+                        temp=c(75.3, 69.0, 67.0, 64.0),
+                        ambient=seq(27.5, 24.0, length.out = 4))
+
 full_run <- tibble(time=convert_time_strings(c("14:33", "14:54", "15:14", "16:10", "16:48", "17:27")),
                    ambient=c(28, 27.8, 27.7, 27.5, 27.2, 27.0),
-                   add=c(0, 0, 4.1, 0, 4.8, 0),
-                   water=c(58.4, 55.4, 51.0, 53.7, 52.7, 55.3),
-                   thin=c(6.5, 54.0, 53.0, 53.2, 52.5, 55.0),
+                   ## add=c(0, 0, 4.1, 0, 4.8, 0),
+                   ## water=c(58.4, 55.4, 51.0, 53.7, 52.7, 55.3),
+                   ## thin=c(6.5, 54.0, 53.0, 53.2, 52.5, 55.0),
+                   add=c(0, 0, 2.1, 0, 4.8, 0),
+                   water=c(58.4, 55.4, 53.0, 53.7, 52.7, 55.3),
+                   thin=c(6.5, 54.0, 51.0, 53.2, 52.5, 55.0),
                    thick=c(0.7, 42.8, 45.6, 52.2, 52.5, 54.3),
                    )
 
@@ -228,14 +235,26 @@ full_meat$temps <- full_run %>%
     as.matrix
 full_meat$N_meat <- ncol(full_meat$temps) - 1
 
+## Reference time series
+full_meat$time_ref <- reference_run$time
+full_meat$T_ref <- length(full_meat$time_ref)
+full_meat$ambient_ref <- reference_run$ambient
+full_meat$temp_ref <- reference_run$temp
+
 ## time constants in minutes
 ## Cauchy priors
-full_meat$prior_k_cooler <- c(1100, 200);
-full_meat$bounds_k_cooler <- c(300, 2000);
+##
+## A mystery remains here: without a relatively tight prior and a high
+## lower bound on the cooler time constant, somehow the posterior
+## clusters much shorter, around 250 minutes.  The reference model
+## alone gives the expected results (closer to 1000 minutes).  Why is
+## this happening?
+full_meat$prior_k_cooler <- c(1000, 50);
+full_meat$bounds_k_cooler <- c(700, 2000);
 full_meat$prior_k_meat <- c(50, 20);
 full_meat$bounds_k_meat <- c(1, 100);
 ## Inverse gamma prior
-full_meat$prior_sigma <- c(3, 0.3);
+full_meat$prior_sigma <- c(3, 1);
 full_meat$rel_tol <- 1e-5
 full_meat$abs_tol <- 1e-5
 full_meat$max_steps <- 5000
@@ -246,12 +265,22 @@ plot_cauchy(full_meat$prior_k_meat, full_meat$bounds_k_meat)
 
 plot_cauchy(full_meat$prior_k_cooler, full_meat$bounds_k_cooler)
 
-model <- cmdstanr::cmdstan_model("sousvide_full.stan")
+ref_model <- cmdstanr::cmdstan_model("sousvide_ref.stan")
+ref_fit <- ref_model$sample(data = full_meat,
+                            seed = 2222,
+                            chains = 4,
+                            parallel_chains = 4)
+ref_fit$summary()
+bayesplot::mcmc_pairs(ref_fit$draws(),
+                      pars = vars(-contains("y_sim"),
+                                  -contains("lp__")),
+                      np = nuts_params(ref_fit)## ,
+                      ## condition = pairs_condition(nuts = "divergent__")
+                      )
 
+model <- cmdstanr::cmdstan_model("sousvide_full.stan")
 fit <- model$sample(data = full_meat,
                     seed = 2222,
-                    ## adapt_delta = 0.9,
-                    ## max_treedepth = 16,
                     chains = 4,
                     parallel_chains = 4)
 
@@ -265,10 +294,42 @@ bayesplot::mcmc_pairs(fit$draws(),
 
 
 
-# Specifying thicknesses doesn't seem to be the way to go.  Perhaps
-# just estimate the thickness ratio between the first meat and
-                                        # subsequent cuts.
+simulated <- fit$draws("y_sim", format="df") %>% tibble
 
-cpp_options <- list("CXXFLAGS += -O3 -march=native")
-cmdstan_make_local(cpp_options = cpp_options, append = TRUE)
-rebuild_cmdstan(cores = 8)
+tidy_posterior <- function(simulated, index, label) {
+    sim_draws <- simulated %>%
+        dplyr::select(starts_with("y_sim[") & ends_with(paste0(index, "]"))) %>%
+        data.frame %>%
+        t
+
+    colnames(sim_draws) <- paste0("draw_", seq(1, ncol(sim_draws)))
+
+    draw_table <- as_tibble(sim_draws)
+
+    draw_table$time <- full_meat$time
+    return(draw_table %>% 
+        tidyr::pivot_longer(cols = -c(time),
+                            names_to = "draw",
+                            values_to = label))
+}
+
+specs <- c(1 = "water", 2 = "thin", 3 = "thick")
+
+posterior <- tidy_posterior(simulated, 1, "water") %>%
+    dplyr::inner_join(tidy_posterior(simulated, 2, "thin"), by = c("time", "draw")) %>%
+    dplyr::inner_join(tidy_posterior(simulated, 3, "thick"), by = c("time", "draw")) 
+    
+posterior %>%
+    ggplot(aes(x = time, group = draw)) +
+    geom_line(aes(y = water),
+              alpha = 0.01,
+              color = "red") +
+    geom_line(aes(y = thin),
+              alpha = 0.01,
+              color = "green") +
+    geom_line(aes(y = thick),
+              alpha = 0.01,
+              color = "blue") +
+    labs(x = "Time [minutes]",
+         y = "Temperature [C]",
+         title = paste("Sous vide"))
